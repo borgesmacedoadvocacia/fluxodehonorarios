@@ -837,7 +837,7 @@ function setStatus(state) {
    FILTER
 ═══════════════════════════════════════════════ */
 function buildMonthFilter() {
-  const months = [...new Set(allRows.map(r => r.mesVencimento).filter(Boolean))];
+  const months = [...new Set(allRows.map(r => r.mesVencimento).filter(m => m && m.endsWith('/26')))];
   months.sort(sortMonths);
 
   const bar = document.getElementById('filter-bar');
