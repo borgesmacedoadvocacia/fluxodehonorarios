@@ -691,8 +691,14 @@ const charts = {};   // keyed by canvas id
    HELPERS
 ═══════════════════════════════════════════════ */
 function parseBRL(raw) {
-  if (raw == null) return 0;
-  const s = String(raw).replace(/R\$\s?/g, '').replace(/\./g, '').replace(',', '.').trim();
+  if (raw == null || raw === '') return 0;
+  if (typeof raw === 'number') return raw;           // gviz já devolve número JS
+  const s = String(raw)
+    .replace(/R\$\s?/g, '')
+    .replace(/\s/g, '')
+    .replace(/\.(?=\d{3}[,\.]?)/g, '')              // remove ponto-milhar (1.234,56 → 1234,56)
+    .replace(',', '.')                               // vírgula decimal → ponto
+    .trim();
   const n = parseFloat(s);
   return isNaN(n) ? 0 : n;
 }
@@ -745,37 +751,60 @@ async function loadData() {
     const res  = await fetch(url);
     const text = await res.text();
 
-    // strip callback wrapper
-    const json = JSON.parse(text.substring(47, text.length - 2));
-    const rows = json.table.rows || [];
+    // strip callback wrapper (handles both "/*O_o*/" prefix variants)
+    const start = text.indexOf('{');
+    const end   = text.lastIndexOf('}');
+    const json  = JSON.parse(text.substring(start, end + 1));
+    const cols  = json.table.cols || [];
+    const rows  = json.table.rows || [];
+
+    // ── Mapeamento robusto por LABEL de coluna (imune a índice errado) ──
+    const colIdx = {};
+    cols.forEach((col, i) => {
+      if (col.label) colIdx[col.label.trim()] = i;
+      if (col.id)    colIdx[col.id]           = i;
+    });
+
+    // Lê célula como string (usa f formatado se existir, senão v)
+    const gStr = (c, label) => {
+      const i = colIdx[label];
+      if (i === undefined || !c[i]) return '';
+      const cell = c[i];
+      return String(cell.f ?? cell.v ?? '').trim();
+    };
+    // Lê célula como número (usa v direto se for number, senão parseBRL do f)
+    const gNum = (c, label) => {
+      const i = colIdx[label];
+      if (i === undefined || !c[i]) return 0;
+      const cell = c[i];
+      if (typeof cell.v === 'number') return cell.v;
+      return parseBRL(cell.f ?? cell.v);
+    };
 
     allRows = rows.map(row => {
       const c = row.c || [];
-      const v = i => (c[i] ? (c[i].v ?? '') : '');
-      const f = i => (c[i] ? (c[i].f ?? c[i].v ?? '') : '');
-
       return {
-        mesVencimento:   String(v(0) || '').trim(),
-        dataVencimento:  String(f(1) || '').trim(),
-        dataPagamento:   String(f(2) || '').trim(),
-        mesPagamento:    String(v(3) || '').trim(),
-        cliente:         String(v(4) || '').trim(),
-        qtdParcelas:     Number(v(5)) || 0,
-        parcelaRef:      Number(v(6)) || 0,
-        produto:         String(v(7) || '').trim(),
-        sdr:             String(v(8) || '').trim(),
-        closer:          String(v(9) || '').trim(),
-        honorariosText:  String(v(10) || '').trim(),
-        tipoHonorarios:  String(v(11) || '').trim(),
-        formaPagamento:  String(v(12) || '').trim(),
-        situacao:        String(v(13) || '').trim(),
-        valorTotal:      parseBRL(f(14)),
-        taxasAdm:        parseBRL(f(15)),
-        valorLiquido:    parseBRL(f(16)),
-        comissaoSDR:     parseBRL(f(17)),
-        comissaoCloser:  parseBRL(f(18)),
+        mesVencimento:  gStr(c, 'Mês/Ano (Vencimento)'),
+        dataVencimento: gStr(c, 'Data do Vencimento'),
+        dataPagamento:  gStr(c, 'Data do Pagamento'),
+        mesPagamento:   gStr(c, 'Mês/Ano (Pagamento)'),
+        cliente:        gStr(c, 'Cliente (Nome Completo)'),
+        qtdParcelas:    gNum(c, 'Qtde. de Parcelas (Pix)'),
+        parcelaRef:     gNum(c, 'Parcela Ref. (Pix)'),
+        produto:        gStr(c, 'Produto Jurídico'),
+        sdr:            gStr(c, 'SDR'),
+        closer:         gStr(c, 'Closer'),
+        honorariosText: gStr(c, 'Honorários Completo (Inicial + Êxito)'),
+        tipoHonorarios: gStr(c, 'Tipo de Honorários'),
+        formaPagamento: gStr(c, 'Forma de Pagamento'),
+        situacao:       gStr(c, 'Situação do Pagamento'),
+        valorTotal:     gNum(c, 'Valor (Total)'),
+        taxasAdm:       gNum(c, 'Taxas Adm.'),
+        valorLiquido:   gNum(c, 'Valor dos Honorários Líquidos'),
+        comissaoSDR:    gNum(c, 'Comissão SDR'),
+        comissaoCloser: gNum(c, 'Comissão Closer'),
       };
-    }).filter(r => r.cliente && r.valorTotal > 0);
+    }).filter(r => r.cliente && r.cliente !== 'Cliente (Nome Completo)');
 
     const now = new Date();
     document.getElementById('last-updated').textContent =
