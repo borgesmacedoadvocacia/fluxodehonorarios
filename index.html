@@ -543,7 +543,7 @@
 
   <!-- FILTER BAR -->
   <div class="filter-bar" id="filter-bar">
-    <span class="filter-label">Mês de Vencimento:</span>
+    <span class="filter-label">Mês de Pagamento:</span>
     <button class="month-btn active" data-month="todos" onclick="setMonth(this)">Todos</button>
   </div>
 
@@ -638,7 +638,7 @@
       <table>
         <thead>
           <tr>
-            <th>Mês Vcto.</th>
+            <th>Mês Pgto.</th>
             <th>Cliente</th>
             <th>Produto Jurídico</th>
             <th>Closer</th>
@@ -837,7 +837,7 @@ function setStatus(state) {
    FILTER
 ═══════════════════════════════════════════════ */
 function buildMonthFilter() {
-  const months = [...new Set(allRows.map(r => r.mesVencimento).filter(m => m && m.endsWith('/26')))];
+  const months = [...new Set(allRows.map(r => r.mesPagamento).filter(m => m && m.endsWith('/26')))];
   months.sort(sortMonths);
 
   const bar = document.getElementById('filter-bar');
@@ -864,7 +864,7 @@ function setMonth(btn) {
 function applyFilter() {
   filtered = currentMonth === 'todos'
     ? [...allRows]
-    : allRows.filter(r => r.mesVencimento === currentMonth);
+    : allRows.filter(r => r.mesPagamento === currentMonth);
   renderAll();
 }
 
@@ -982,12 +982,12 @@ function renderMonthly() {
 
   const byMonth = {};
   allRows.forEach(r => {
-    const m = r.mesVencimento;
-    if (!m) return;
+    const m = r.mesPagamento;
+    if (!m) return;                                    // ignora sem data de pagamento
     if (!byMonth[m]) byMonth[m] = { pago: 0, vencido: 0, avencer: 0 };
-    if (r.situacao === 'Pago')     byMonth[m].pago    += r.valorTotal;
-    else if (r.situacao === 'Vencido') byMonth[m].vencido += r.valorTotal;
-    else                           byMonth[m].avencer += r.valorTotal;
+    if (r.situacao === 'Pago')          byMonth[m].pago    += r.valorTotal;
+    else if (r.situacao === 'Vencido')  byMonth[m].vencido += r.valorTotal;
+    else                                byMonth[m].avencer += r.valorTotal;
   });
 
   const months = Object.keys(byMonth).sort(sortMonths);
@@ -1216,7 +1216,7 @@ function renderTable() {
   document.getElementById('tbody').innerHTML = slice.length
     ? slice.map(r => `
       <tr>
-        <td style="white-space:nowrap;color:var(--text-sub);font-size:11px">${r.mesVencimento || '—'}</td>
+        <td style="white-space:nowrap;color:var(--text-sub);font-size:11px">${r.mesPagamento || r.mesVencimento || '—'}</td>
         <td style="max-width:170px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${r.cliente}">${r.cliente}</td>
         <td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${r.produto}">${r.produto || '—'}</td>
         <td>${r.closer || '—'}</td>
