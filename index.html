@@ -765,6 +765,9 @@ async function loadData() {
       if (col.id)    colIdx[col.id]           = i;
     });
 
+    // Debug: mostra labels encontrados (remover após validação)
+    console.log('Colunas detectadas:', Object.keys(colIdx));
+
     // Lê célula como string (usa f formatado se existir, senão v)
     const gStr = (c, label) => {
       const i = colIdx[label];
@@ -781,13 +784,46 @@ async function loadData() {
       return parseBRL(cell.f ?? cell.v);
     };
 
+    // Converte célula gviz de data (v = "Date(yyyy,m0,d)") para "Mês/AA"
+    // Isso ignora a fórmula bugada do Sheets e lê o valor bruto da data
+    const gvizDateToMonthYear = (cell) => {
+      if (!cell || cell.v == null) return '';
+      const raw = String(cell.v);
+      const m = raw.match(/Date\((\d+),(\d+),/);
+      if (!m) return '';
+      const yr  = String(m[1]).slice(-2);
+      const mon = MONTH_ORDER[parseInt(m[2], 10)];
+      return mon ? `${mon}/${yr}` : '';
+    };
+
+    // Retorna índice da coluna por id OU por label (busca parcial p/ acentos)
+    const findCol = (...ids) => {
+      for (const id of ids) {
+        if (colIdx[id] !== undefined) return colIdx[id];
+        // busca parcial case-insensitive (ajuda com encoding de acentos)
+        const lower = id.toLowerCase();
+        const found = Object.keys(colIdx).find(k => k.toLowerCase().includes(lower));
+        if (found !== undefined) return colIdx[found];
+      }
+      return undefined;
+    };
+
+    // Índices das colunas de data de pagamento e vencimento (por id gviz A..Z)
+    const iDataPgto  = findCol('C', 'Data do Pagamento');
+    const iDataVenc  = findCol('B', 'Data do Vencimento');
+
     allRows = rows.map(row => {
       const c = row.c || [];
+
+      // Deriva mês/ano a partir da data bruta (ignora fórmula TEXT do Sheets)
+      const mesPgtoRaw  = iDataPgto !== undefined ? gvizDateToMonthYear(c[iDataPgto]) : '';
+      const mesVencRaw  = iDataVenc !== undefined ? gvizDateToMonthYear(c[iDataVenc]) : '';
+
       return {
-        mesVencimento:  gStr(c, 'Mês/Ano (Vencimento)'),
+        mesVencimento:  mesVencRaw  || gStr(c, 'Mês/Ano (Vencimento)'),
         dataVencimento: gStr(c, 'Data do Vencimento'),
         dataPagamento:  gStr(c, 'Data do Pagamento'),
-        mesPagamento:   gStr(c, 'Mês/Ano (Pagamento)'),
+        mesPagamento:   mesPgtoRaw  || gStr(c, 'Mês/Ano (Pagamento)'),
         cliente:        gStr(c, 'Cliente (Nome Completo)'),
         qtdParcelas:    gNum(c, 'Qtde. de Parcelas (Pix)'),
         parcelaRef:     gNum(c, 'Parcela Ref. (Pix)'),
