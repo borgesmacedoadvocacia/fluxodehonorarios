@@ -721,7 +721,9 @@ const PLANILHAS = [
 ═══════════════════════════════════════════════ */
 let allRows     = [];
 let filtered    = [];
-let currentMonth = 'todos';
+/* Conjunto vazio = todos os meses. Cada botão de mês liga e desliga o seu,
+   para permitir recortes como "só o 1º trimestre" ou "os três últimos". */
+let mesesSel     = new Set();
 let currentYear  = 'todos';
 let searchQuery  = '';
 let currentPage  = 1;
@@ -972,23 +974,19 @@ function buildMonthFilter() {
     : allRows.filter(r => String(r.anoPagamento) === String(currentYear));
   const months = [...new Set(doAno.map(r => r.mesPagamento).filter(Boolean))].sort(sortMonths);
 
+  /* Trocar de ano não apaga o que já estava marcado em outro: os rótulos
+     carregam o ano ("Março/25"), então a seleção atravessa a troca. */
   const bar = document.getElementById('filter-bar');
   bar.querySelectorAll('.month-btn:not([data-month="todos"])').forEach(b => b.remove());
   months.forEach(m => {
     const btn = document.createElement('button');
-    btn.className = 'month-btn' + (m === currentMonth ? ' active' : '');
+    btn.className = 'month-btn' + (mesesSel.has(m) ? ' active' : '');
     btn.textContent = abbrevMonth(m);
     btn.dataset.month = m;
     btn.onclick = () => setMonth(btn);
     bar.appendChild(btn);
   });
-
-  /* Se o mês escolhido não existe no ano agora selecionado, volta para Todos
-     em vez de deixar o painel vazio sem explicação. */
-  if (currentMonth !== 'todos' && !months.includes(currentMonth)) {
-    currentMonth = 'todos';
-    bar.querySelector('[data-month="todos"]').classList.add('active');
-  }
+  bar.querySelector('[data-month="todos"]').classList.toggle('active', mesesSel.size === 0);
   atualizarResumoFiltro(doAno.length, months.length);
 }
 
@@ -1006,13 +1004,22 @@ function atualizarResumoFiltro(linhasDoAno, qtdMeses) {
       (anos.length === 1 ? anos[0] : anos[anos.length - 1] + '–' + anos[0]);
   }
 
+  /* Quando há meses marcados, é a seleção que manda — o resumo diz isso em
+     vez de repetir o ano, que naquele momento não está filtrando nada. */
+  const escolhidos = [...mesesSel].sort(sortMonths);
+  const recorte = escolhidos.length
+    ? ' · <b>' + escolhidos.length + '</b> ' + (escolhidos.length === 1 ? 'mês selecionado' : 'meses selecionados') +
+      ': ' + escolhidos.map(abbrevMonth).join(', ') +
+      ' · <b>' + (typeof filtered !== 'undefined' ? filtered.length.toLocaleString('pt-BR') : '0') + '</b> lançamentos no recorte'
+    : (currentYear === 'todos'
+        ? ' · <b>' + qtdMeses + '</b> meses disponíveis'
+        : ' · <b>' + linhasDoAno.toLocaleString('pt-BR') + '</b> em ' + currentYear);
+
   el.innerHTML =
     '<b>' + allRows.length.toLocaleString('pt-BR') + '</b> lançamentos · ' +
-    (anos.length ? anos[anos.length - 1] + ' a ' + anos[0] : '—') +
-    (currentYear === 'todos'
-      ? ' · <b>' + qtdMeses + '</b> meses disponíveis'
-      : ' · <b>' + linhasDoAno.toLocaleString('pt-BR') + '</b> em ' + currentYear) +
-    (semData ? ' · <b>' + semData + '</b> sem data de pagamento ficam fora do recorte por mês' : '');
+    (anos.length ? anos[anos.length - 1] + ' a ' + anos[0] : '—') + recorte +
+    (semData ? ' · <b>' + semData + '</b> sem data de pagamento ficam fora do recorte por mês' : '') +
+    (escolhidos.length ? '' : ' · <i>clique em vários meses para somá-los</i>');
 }
 
 function setYear(btn) {
@@ -1024,18 +1031,40 @@ function setYear(btn) {
   applyFilter();
 }
 
+/* Cada clique liga ou desliga aquele mês. "Todos" limpa a seleção. */
 function setMonth(btn) {
-  document.querySelectorAll('#filter-bar .month-btn').forEach(b => b.classList.remove('active'));
-  btn.classList.add('active');
-  currentMonth = btn.dataset.month;
-  currentPage  = 1;
+  const m = btn.dataset.month;
+  if (m === 'todos') mesesSel.clear();
+  else if (mesesSel.has(m)) mesesSel.delete(m);
+  else mesesSel.add(m);
+
+  document.querySelectorAll('#filter-bar .month-btn').forEach(b =>
+    b.classList.toggle('active',
+      b.dataset.month === 'todos' ? mesesSel.size === 0 : mesesSel.has(b.dataset.month)));
+
+  currentPage = 1;
   applyFilter();
+  atualizarResumoFiltro(linhasDoAnoAtual(), mesesDoAnoAtual().length);
 }
 
+function linhasDoAnoAtual() {
+  return currentYear === 'todos'
+    ? allRows.length
+    : allRows.filter(r => String(r.anoPagamento) === String(currentYear)).length;
+}
+function mesesDoAnoAtual() {
+  const base = currentYear === 'todos'
+    ? allRows
+    : allRows.filter(r => String(r.anoPagamento) === String(currentYear));
+  return [...new Set(base.map(r => r.mesPagamento).filter(Boolean))];
+}
+
+/* Os meses marcados mandam no recorte; sem nenhum, vale o ano. Assim dá para
+   escolher meses de anos diferentes sem o filtro de ano brigar com eles. */
 function applyFilter() {
-  filtered = allRows.filter(r =>
-    (currentYear === 'todos' || String(r.anoPagamento) === String(currentYear)) &&
-    (currentMonth === 'todos' || r.mesPagamento === currentMonth));
+  filtered = mesesSel.size
+    ? allRows.filter(r => mesesSel.has(r.mesPagamento))
+    : allRows.filter(r => currentYear === 'todos' || String(r.anoPagamento) === String(currentYear));
   renderAll();
 }
 
