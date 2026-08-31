@@ -126,6 +126,16 @@
 
     .filter-label { font-size: 12px; font-weight: 600; color: var(--text-sub); margin-right: 2px; }
 
+    .filter-summary {
+      margin: -4px 0 14px;
+      font-size: 12px;
+      color: var(--text-soft, #6b7280);
+      line-height: 1.6;
+    }
+    .filter-summary b { color: var(--text-main); font-weight: 600; }
+    #year-bar .month-btn[data-year=todos]        { background: var(--neutral); color: #fff; border-color: var(--neutral); }
+    #year-bar .month-btn[data-year=todos].active { background: var(--primary); border-color: var(--primary); }
+
     .month-btn {
       padding: 5px 14px;
       border-radius: 20px;
@@ -542,7 +552,7 @@
     <div class="logo-sep"></div>
     <div class="logo-text-col">
       <div class="header-title">Fluxo de Honorários</div>
-      <div class="header-sub">BM Advocacia &amp; Consultoria · 2026</div>
+      <div class="header-sub" id="header-sub">BM Advocacia &amp; Consultoria</div>
     </div>
   </div>
   <div class="header-right">
@@ -556,10 +566,17 @@
 <main class="container">
 
   <!-- FILTER BAR -->
+  <div class="filter-bar" id="year-bar">
+    <span class="filter-label">Ano:</span>
+    <button class="month-btn active" data-year="todos" onclick="setYear(this)">Todos</button>
+  </div>
+
   <div class="filter-bar" id="filter-bar">
     <span class="filter-label">Mês de Pagamento:</span>
     <button class="month-btn active" data-month="todos" onclick="setMonth(this)">Todos</button>
   </div>
+
+  <div class="filter-summary" id="filter-summary"></div>
 
   <!-- ── KPI ROW 1 ── -->
   <div class="section-title">💰 Financeiro</div>
@@ -686,8 +703,18 @@
 /* ═══════════════════════════════════════════════
    CONFIG
 ═══════════════════════════════════════════════ */
-const SHEET_ID = '1kdbRX1YzlnUa6w2BkHgzHUCFWBWsUZcHEhwzcRe7zDw';
-const GID      = '0';
+/* Uma planilha por ano. As duas têm a aba principal em gid=0, mas com layouts
+   diferentes: a de 2025 traz três colunas a mais no meio (CPF/CNPJ, Origem do
+   Cliente, Situação da NF). Por isso toda leitura é por NOME de cabeçalho,
+   nunca por posição.
+
+   A leitura é feita pela exportação CSV, não pelo gviz: o gviz trunca em
+   silêncio — devolvia 152 das 673 linhas de 2026 e 4 das 895 de 2025, com
+   HTTP 200 e sem aviso nenhum. */
+const PLANILHAS = [
+  { ano: 2026, id: '1kdbRX1YzlnUa6w2BkHgzHUCFWBWsUZcHEhwzcRe7zDw', gid: '0' },
+  { ano: 2025, id: '1U0WJ5HEbEEhjprR_V0iuwcqf96K6rjGsO-3olOhnBBQ', gid: '0' }
+];
 
 /* ═══════════════════════════════════════════════
    STATE
@@ -695,6 +722,7 @@ const GID      = '0';
 let allRows     = [];
 let filtered    = [];
 let currentMonth = 'todos';
+let currentYear  = 'todos';
 let searchQuery  = '';
 let currentPage  = 1;
 const PAGE_SIZE  = 15;
@@ -756,105 +784,136 @@ function abbrevMonth(label) {
 /* ═══════════════════════════════════════════════
    DATA LOAD
 ═══════════════════════════════════════════════ */
+
+/* Parser de CSV que respeita aspas: nomes de cliente e valores trazem
+   vírgulas, e um split(',') simples desalinharia a linha inteira. */
+function parseCSV(texto) {
+  const linhas = [];
+  let campo = '', linha = [], aspas = false;
+  for (let i = 0; i < texto.length; i++) {
+    const c = texto[i];
+    if (aspas) {
+      if (c === '"') {
+        if (texto[i + 1] === '"') { campo += '"'; i++; }   // aspas escapadas
+        else aspas = false;
+      } else campo += c;
+    } else if (c === '"') aspas = true;
+    else if (c === ',') { linha.push(campo); campo = ''; }
+    else if (c === '\n') { linha.push(campo); linhas.push(linha); linha = []; campo = ''; }
+    else if (c !== '\r') campo += c;
+  }
+  if (campo !== '' || linha.length) { linha.push(campo); linhas.push(linha); }
+  return linhas;
+}
+
+/* dd/mm/aaaa → {ano, mes} ou null. Não aceita nada além desse formato:
+   a planilha tem células "Dezembro/99", resultado de fórmula sobre data
+   vazia, e elas não podem virar mês nenhum. */
+function parseDataBR(txt) {
+  const m = /^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/.exec((txt || '').trim());
+  if (!m) return null;
+  let ano = Number(m[3]);
+  if (ano < 100) ano += 2000;
+  const mes = Number(m[2]) - 1;
+  if (mes < 0 || mes > 11) return null;
+  return { ano, mes };
+}
+function rotuloMes(d) { return d ? MONTH_ORDER[d.mes] + '/' + String(d.ano).slice(-2) : ''; }
+
+async function carregarPlanilha(cfg) {
+  const url = `https://docs.google.com/spreadsheets/d/${cfg.id}/export?format=csv&gid=${cfg.gid}`;
+  const res = await fetch(url, { cache: 'no-store' });
+  if (!res.ok) throw new Error(`planilha de ${cfg.ano}: HTTP ${res.status}`);
+  const linhas = parseCSV(await res.text());
+  if (!linhas.length) return [];
+
+  const cab = linhas[0].map(h => String(h).trim());
+  /* Busca a coluna pelo nome exato e, se não achar, por trecho — os rótulos
+     mudam entre os anos ("Qtde. de Parcelas (Pix)" virou "(Apenas Pix)"). */
+  const idx = (...nomes) => {
+    for (const nome of nomes) {
+      const exato = cab.indexOf(nome);
+      if (exato >= 0) return exato;
+    }
+    for (const nome of nomes) {
+      const alvo = nome.toLowerCase();
+      const i = cab.findIndex(h => h.toLowerCase().includes(alvo));
+      if (i >= 0) return i;
+    }
+    return -1;
+  };
+  const COL = {
+    dataVenc:  idx('Data do Vencimento'),
+    dataPgto:  idx('Data do Pagamento'),
+    mesVenc:   idx('Mês/Ano (Vencimento)'),
+    mesPgto:   idx('Mês/Ano (Pagamento)'),
+    cliente:   idx('Cliente (Nome Completo)', 'Cliente'),
+    qtd:       idx('Qtde. de Parcelas'),
+    parcela:   idx('Parcela Ref.'),
+    produto:   idx('Produto Jurídico'),
+    sdr:       idx('SDR'),
+    closer:    idx('Closer'),
+    honText:   idx('Honorários Completo'),
+    tipo:      idx('Tipo de Honorários'),
+    forma:     idx('Forma de Pagamento'),
+    situacao:  idx('Situação do Pagamento'),
+    total:     idx('Valor (Total)'),
+    taxas:     idx('Taxas Adm.'),
+    liquido:   idx('Valor dos Honorários Líquidos'),
+    comSDR:    idx('Comissão SDR'),
+    comCloser: idx('Comissão Closer')
+  };
+
+  const out = [];
+  for (let i = 1; i < linhas.length; i++) {
+    const r = linhas[i];
+    const txt = k => (COL[k] >= 0 && COL[k] < r.length ? String(r[COL[k]]).trim() : '');
+    const val = k => parseBRL(txt(k));
+    const cliente = txt('cliente');
+    if (!cliente || cliente === 'Cliente (Nome Completo)') continue;
+
+    /* O mês vem da data real. As colunas "Mês/Ano" da planilha são fórmulas
+       de texto que produzem "Dezembro/99" quando a data está vazia — usá-las
+       inventaria um mês que não existe. */
+    const dPgto = parseDataBR(txt('dataPgto'));
+    const dVenc = parseDataBR(txt('dataVenc'));
+
+    out.push({
+      anoPlanilha:    cfg.ano,
+      mesVencimento:  rotuloMes(dVenc),
+      dataVencimento: txt('dataVenc'),
+      dataPagamento:  txt('dataPgto'),
+      mesPagamento:   rotuloMes(dPgto),
+      anoPagamento:   dPgto ? dPgto.ano : null,
+      cliente,
+      qtdParcelas:    val('qtd'),
+      parcelaRef:     val('parcela'),
+      produto:        txt('produto'),
+      sdr:            txt('sdr'),
+      closer:         txt('closer'),
+      honorariosText: txt('honText'),
+      tipoHonorarios: txt('tipo'),
+      formaPagamento: txt('forma'),
+      situacao:       txt('situacao'),
+      valorTotal:     val('total'),
+      taxasAdm:       val('taxas'),
+      valorLiquido:   val('liquido'),
+      comissaoSDR:    val('comSDR'),
+      comissaoCloser: val('comCloser')
+    });
+  }
+  return out;
+}
+
 async function loadData() {
   setStatus('loading');
   document.getElementById('last-updated').textContent = 'Carregando…';
 
   try {
-    const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json&gid=${GID}`;
-    const res  = await fetch(url);
-    const text = await res.text();
-
-    // strip callback wrapper (handles both "/*O_o*/" prefix variants)
-    const start = text.indexOf('{');
-    const end   = text.lastIndexOf('}');
-    const json  = JSON.parse(text.substring(start, end + 1));
-    const cols  = json.table.cols || [];
-    const rows  = json.table.rows || [];
-
-    // ── Mapeamento robusto por LABEL de coluna (imune a índice errado) ──
-    const colIdx = {};
-    cols.forEach((col, i) => {
-      if (col.label) colIdx[col.label.trim()] = i;
-      if (col.id)    colIdx[col.id]           = i;
-    });
-
-    // Debug: mostra labels encontrados (remover após validação)
-    console.log('Colunas detectadas:', Object.keys(colIdx));
-
-    // Lê célula como string (usa f formatado se existir, senão v)
-    const gStr = (c, label) => {
-      const i = colIdx[label];
-      if (i === undefined || !c[i]) return '';
-      const cell = c[i];
-      return String(cell.f ?? cell.v ?? '').trim();
-    };
-    // Lê célula como número (usa v direto se for number, senão parseBRL do f)
-    const gNum = (c, label) => {
-      const i = colIdx[label];
-      if (i === undefined || !c[i]) return 0;
-      const cell = c[i];
-      if (typeof cell.v === 'number') return cell.v;
-      return parseBRL(cell.f ?? cell.v);
-    };
-
-    // Converte célula gviz de data (v = "Date(yyyy,m0,d)") para "Mês/AA"
-    // Isso ignora a fórmula bugada do Sheets e lê o valor bruto da data
-    const gvizDateToMonthYear = (cell) => {
-      if (!cell || cell.v == null) return '';
-      const raw = String(cell.v);
-      const m = raw.match(/Date\((\d+),(\d+),/);
-      if (!m) return '';
-      const yr  = String(m[1]).slice(-2);
-      const mon = MONTH_ORDER[parseInt(m[2], 10)];
-      return mon ? `${mon}/${yr}` : '';
-    };
-
-    // Retorna índice da coluna por id OU por label (busca parcial p/ acentos)
-    const findCol = (...ids) => {
-      for (const id of ids) {
-        if (colIdx[id] !== undefined) return colIdx[id];
-        // busca parcial case-insensitive (ajuda com encoding de acentos)
-        const lower = id.toLowerCase();
-        const found = Object.keys(colIdx).find(k => k.toLowerCase().includes(lower));
-        if (found !== undefined) return colIdx[found];
-      }
-      return undefined;
-    };
-
-    // Índices das colunas de data de pagamento e vencimento (por id gviz A..Z)
-    const iDataPgto  = findCol('C', 'Data do Pagamento');
-    const iDataVenc  = findCol('B', 'Data do Vencimento');
-
-    allRows = rows.map(row => {
-      const c = row.c || [];
-
-      // Deriva mês/ano a partir da data bruta (ignora fórmula TEXT do Sheets)
-      const mesPgtoRaw  = iDataPgto !== undefined ? gvizDateToMonthYear(c[iDataPgto]) : '';
-      const mesVencRaw  = iDataVenc !== undefined ? gvizDateToMonthYear(c[iDataVenc]) : '';
-
-      return {
-        mesVencimento:  mesVencRaw  || gStr(c, 'Mês/Ano (Vencimento)'),
-        dataVencimento: gStr(c, 'Data do Vencimento'),
-        dataPagamento:  gStr(c, 'Data do Pagamento'),
-        mesPagamento:   mesPgtoRaw  || gStr(c, 'Mês/Ano (Pagamento)'),
-        cliente:        gStr(c, 'Cliente (Nome Completo)'),
-        qtdParcelas:    gNum(c, 'Qtde. de Parcelas (Pix)'),
-        parcelaRef:     gNum(c, 'Parcela Ref. (Pix)'),
-        produto:        gStr(c, 'Produto Jurídico'),
-        sdr:            gStr(c, 'SDR'),
-        closer:         gStr(c, 'Closer'),
-        honorariosText: gStr(c, 'Honorários Completo (Inicial + Êxito)'),
-        tipoHonorarios: gStr(c, 'Tipo de Honorários'),
-        formaPagamento: gStr(c, 'Forma de Pagamento'),
-        situacao:       gStr(c, 'Situação do Pagamento'),
-        valorTotal:     gNum(c, 'Valor (Total)'),
-        taxasAdm:       gNum(c, 'Taxas Adm.'),
-        valorLiquido:   gNum(c, 'Valor dos Honorários Líquidos'),
-        comissaoSDR:    gNum(c, 'Comissão SDR'),
-        comissaoCloser: gNum(c, 'Comissão Closer'),
-      };
-    }).filter(r => r.cliente && r.cliente !== 'Cliente (Nome Completo)');
+    /* Lê as duas planilhas em paralelo pela exportação CSV. */
+    const partes = await Promise.all(PLANILHAS.map(carregarPlanilha));
+    allRows = partes.flat();
+    if (!allRows.length) throw new Error('Nenhuma linha retornada pelas planilhas.');
 
     const now = new Date();
     document.getElementById('last-updated').textContent =
@@ -886,25 +945,87 @@ function setStatus(state) {
 /* ═══════════════════════════════════════════════
    FILTER
 ═══════════════════════════════════════════════ */
+/* Anos presentes nos dados, do mais recente para o mais antigo. */
+function anosDisponiveis() {
+  return [...new Set(allRows.map(r => r.anoPagamento).filter(Boolean))].sort((a, b) => b - a);
+}
+
+/* Monta as duas faixas: uma de anos, outra dos meses do ano escolhido.
+   Com dois anos de base seriam mais de vinte botões de mês numa linha só —
+   por isso o ano vem primeiro e recorta a lista de meses. */
 function buildMonthFilter() {
-  const months = [...new Set(allRows.map(r => r.mesPagamento).filter(m => m && m.endsWith('/26')))];
-  months.sort(sortMonths);
+  const anos = anosDisponiveis();
+
+  const barAno = document.getElementById('year-bar');
+  barAno.querySelectorAll('.month-btn:not([data-year="todos"])').forEach(b => b.remove());
+  anos.forEach(a => {
+    const btn = document.createElement('button');
+    btn.className = 'month-btn' + (String(a) === String(currentYear) ? ' active' : '');
+    btn.textContent = a;
+    btn.dataset.year = a;
+    btn.onclick = () => setYear(btn);
+    barAno.appendChild(btn);
+  });
+
+  const doAno = currentYear === 'todos'
+    ? allRows
+    : allRows.filter(r => String(r.anoPagamento) === String(currentYear));
+  const months = [...new Set(doAno.map(r => r.mesPagamento).filter(Boolean))].sort(sortMonths);
 
   const bar = document.getElementById('filter-bar');
   bar.querySelectorAll('.month-btn:not([data-month="todos"])').forEach(b => b.remove());
-
   months.forEach(m => {
     const btn = document.createElement('button');
-    btn.className = 'month-btn';
+    btn.className = 'month-btn' + (m === currentMonth ? ' active' : '');
     btn.textContent = abbrevMonth(m);
     btn.dataset.month = m;
     btn.onclick = () => setMonth(btn);
     bar.appendChild(btn);
   });
+
+  /* Se o mês escolhido não existe no ano agora selecionado, volta para Todos
+     em vez de deixar o painel vazio sem explicação. */
+  if (currentMonth !== 'todos' && !months.includes(currentMonth)) {
+    currentMonth = 'todos';
+    bar.querySelector('[data-month="todos"]').classList.add('active');
+  }
+  atualizarResumoFiltro(doAno.length, months.length);
+}
+
+function atualizarResumoFiltro(linhasDoAno, qtdMeses) {
+  const el = document.getElementById('filter-summary');
+  if (!el) return;
+  const semData = allRows.filter(r => !r.anoPagamento).length;
+  const anos = anosDisponiveis();
+
+  /* O cabeçalho anuncia a cobertura real dos dados, em vez de um ano fixo:
+     quando entrar a planilha de 2027, ele se ajusta sozinho. */
+  const sub = document.getElementById('header-sub');
+  if (sub && anos.length) {
+    sub.textContent = 'BM Advocacia & Consultoria · ' +
+      (anos.length === 1 ? anos[0] : anos[anos.length - 1] + '–' + anos[0]);
+  }
+
+  el.innerHTML =
+    '<b>' + allRows.length.toLocaleString('pt-BR') + '</b> lançamentos · ' +
+    (anos.length ? anos[anos.length - 1] + ' a ' + anos[0] : '—') +
+    (currentYear === 'todos'
+      ? ' · <b>' + qtdMeses + '</b> meses disponíveis'
+      : ' · <b>' + linhasDoAno.toLocaleString('pt-BR') + '</b> em ' + currentYear) +
+    (semData ? ' · <b>' + semData + '</b> sem data de pagamento ficam fora do recorte por mês' : '');
+}
+
+function setYear(btn) {
+  document.querySelectorAll('#year-bar .month-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  currentYear = btn.dataset.year;
+  currentPage = 1;
+  buildMonthFilter();
+  applyFilter();
 }
 
 function setMonth(btn) {
-  document.querySelectorAll('.month-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('#filter-bar .month-btn').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
   currentMonth = btn.dataset.month;
   currentPage  = 1;
@@ -912,9 +1033,9 @@ function setMonth(btn) {
 }
 
 function applyFilter() {
-  filtered = currentMonth === 'todos'
-    ? [...allRows]
-    : allRows.filter(r => r.mesPagamento === currentMonth);
+  filtered = allRows.filter(r =>
+    (currentYear === 'todos' || String(r.anoPagamento) === String(currentYear)) &&
+    (currentMonth === 'todos' || r.mesPagamento === currentMonth));
   renderAll();
 }
 
